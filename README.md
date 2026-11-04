@@ -11,13 +11,31 @@ The slowdown column compares ADO with npmjs for the **same pnpm version**.
 | 12.7.0 | 0.4 s | 1.2 s | 2.7X slower |
 | **12.8.0** | **0.4 s** | **14.0 s** | **31.4X slower** |
 | 12.16.1 (latest 12.x tested) | 1.9 s | 12.1 s | 6.4X slower |
-| 11.28.0 | 2.9 s | 13.5 s | 4.6X slower |
+| 11.23.0 | 1.2 s | 3.6 s | 2.9X slower |
+| 11.24.0 | 1.2 s | 2.7 s | 2.2X slower |
+| 11.25.0 | 1.4 s | 2.5 s | 1.8X slower |
+| 11.26.0 | 1.4 s | 2.9 s | 2.1X slower |
+| **11.27.0** | **1.5 s** | **2.4 s** | **1.6X slower** |
+| **11.27.1** | **3.6 s** | **13.3 s** | **3.7X slower** |
+| 11.28.0 | 3.3 s | 13.1 s | 3.9X slower |
 | 11.28.1 | 2.9 s | 15.8 s | 5.4X slower |
 | 11.28.9 (latest 11.x tested) | 1.3 s | 16.0 s | 12.5X slower |
 
-The ADO/npmjs gap jumps from **2.7X to 31.4X** in 12.8.0. The latest 12.x tested has not recovered the earlier ADO performance; its smaller ratio also reflects npmjs getting slower. pnpm 11 was already slow before 11.28.1 and does not show the same sharp regression.
+The ADO/npmjs gap jumps from **2.7X to 31.4X** in 12.8.0. The latest 12.x tested has not recovered the earlier ADO performance; its smaller ratio also reflects npmjs getting slower.
 
-## Likely cause
+pnpm 11 has a separate, earlier regression at **11.27.0 to 11.27.1**: ADO becomes **5.5X slower** in absolute time, before the cache-control change in 11.28.1.
+
+The 11.23.0 recheck remains fast, but does **not** exactly reproduce the historical 1.4 s npmjs / 2.7 s ADO result (2.0X). Today's ADO median is about 32% higher, with a 2.9X gap. Absolute timings vary, but that does not explain the much larger release-boundary jump.
+
+## pnpm 11.27.1: lockfile preferences disable a cache shortcut
+
+[pnpm/pnpm#15180: converge after direct dependency bumps](https://github.com/pnpm/pnpm/pull/15180) first shipped in [11.27.1](https://github.com/pnpm/pnpm/releases/tag/v11.27.1), released September 20, 2026. It changes dedupe's lockfile preference weight from **1,000,000 to 1**.
+
+The stable-range metadata-cache shortcut introduced by [pnpm/pnpm#13980](https://github.com/pnpm/pnpm/pull/13980) requires a lockfile preference weight of [at least 1,000,000](https://github.com/pnpm/pnpm/blob/v11.27.1/pnpm11/resolving/npm-resolver/src/pickPackageFromMeta.ts#L238-L257). Lowering the weight disables that shortcut during dedupe, increasing registry metadata work. This change affects the TypeScript pnpm 11 implementation, not pnpm 12.
+
+Restoring only the old weight in an isolated 11.27.1 build brought ADO back from **14.0 s to 3.8 s**, confirming the mechanism. This is a diagnostic, not a proposed fix: simply reverting the weight risks reintroducing the dedupe correctness bug that pnpm/pnpm#15180 fixed.
+
+## pnpm 12.8.0 / 11.28.1: cache-control change
 
 [pnpm/pnpm#15722: refetch registry metadata when caching is forbidden](https://github.com/pnpm/pnpm/pull/15722) first shipped in [12.8.0](https://github.com/pnpm/pnpm/releases/tag/v12.8.0) and [11.28.1](https://github.com/pnpm/pnpm/releases/tag/v11.28.1), both released September 28, 2026.
 
@@ -59,8 +77,12 @@ pnpm dedupe --lockfile-only
 
 Each version/registry combination used the checked-in dependency manifest and the same starting lockfile, restored before every invocation, with its own metadata cache and initially empty store. The exact pnpm version was verified and matched the fixture's `packageManager`. No dependencies were installed; `minimumReleaseAge` was zero, and neither `offline` nor `preferOffline` was enabled.
 
-The table shows medians of **three runs after a cold-cache warmup**, with cache-file timestamps set ten minutes old before each run. Additional runs with fresh timestamps showed the same regression, so running dedupe again within five minutes does not avoid it. Runs were serial, with registry order alternated.
+The table shows medians of **at least three runs after a cold-cache warmup**, with cache-file timestamps set ten minutes old before each run. The 11.23.0 and 11.27.1 rows include all six retained samples per registry, combining the bisection and confirmation runs. All seven stable releases from 11.23.0 through 11.28.0 were measured, including releases skipped by the binary search. The 11.28.0 row replaces an earlier measurement with this fresh bisection result.
+
+For the pnpm 12 regression, additional runs with fresh timestamps showed the same slowdown, so running dedupe again within five minutes does not avoid it. Runs were serial, with registry order alternated.
+
+The isolated 11.27.1 diagnostic changed only the lockfile preference weight and used three runs per registry, interleaved with stock 11.27.1 and 11.23.0 rechecks. Stock and modified builds produced identical output lockfiles for each registry. The number of metadata cache files rewritten fell from 1,099 to 11; these are filesystem observations, not HTTP request counts.
 
 Times and ratios are rounded to one decimal place; ratios use the unrounded medians. Samples with explicit network retry warnings were replaced, but slow samples without warnings were retained. ADO timings on 12.16.1 varied from 10.2 s to 21.4 s.
 
-[Raw results](results/2026-10-28T16-04-18.180Z.json) preserve all timings and retry warnings. The project's `packageManager` pins 12.8.0, the first affected release.
+The project's `packageManager` pins 12.8.0, the first pnpm 12 release affected by the cache-control regression.
