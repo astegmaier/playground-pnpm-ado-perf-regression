@@ -30,6 +30,25 @@ Times are median seconds; **ADO/npmjs** compares same-version registries, not ve
 
 [pnpm/pnpm#13980](https://github.com/pnpm/pnpm/pull/13980) lets pnpm reuse cached package metadata without contacting the registry when lockfile preference weights prove that no uncached version can tie or beat the selected cached version. This avoids even conditional revalidation requests. The proof establishes the winning version, not metadata freshness: later deprecation or unpublishing changes can still be missed.
 
+## ADO versus npmjs
+
+Three metadata-response differences make this public ADO feed expensive:
+
+1. **No ETag or Last-Modified validators.** npmjs supplies an ETag, allowing unchanged metadata to return a bodyless `304 Not Modified`. This ADO feed provides neither response validator.
+2. **`Cache-Control: no-cache`.** npmjs returns `public, max-age=300`. [pnpm/pnpm#15722](https://github.com/pnpm/pnpm/pull/15722) marks `no-cache`, `no-store`, or `max-age=0` responses uncacheable and bypasses online metadata shortcuts. Only `no-cache` was observed here. `no-cache` alone permits conditional revalidation, but without validators ADO requires full fetches.
+3. **No abbreviated packuments.** ADO ignores `Accept: application/vnd.npm.install-v1+json` and returns full package metadata; npmjs returns a smaller, resolution-focused response. The larger bodies make each ADO fetch slower, compounding the cost of repeated requests.
+
+Compare the response headers; neither feed requires authentication:
+
+```sh
+for registry in https://registry.npmjs.org \
+  https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry; do
+  echo "$registry"
+  curl -fsS -D - -o /dev/null -H 'Accept: application/vnd.npm.install-v1+json' \
+    "$registry/source-map" | grep -Ei '^(HTTP/|etag:|last-modified:|cache-control:)'
+done
+```
+
 ## Causes and recovery
 
 ### 1. Lockfile preferences disable cache reuse
@@ -38,7 +57,7 @@ Times are median seconds; **ADO/npmjs** compares same-version registries, not ve
 
 ### 2. `no-cache` responses bypass metadata shortcuts
 
-[pnpm/pnpm#15722](https://github.com/pnpm/pnpm/pull/15722) (**11.28.1 / 12.8.0**) blocks online metadata shortcuts for `no-cache` responses. ADO returns `no-cache` without ETag/Last-Modified, forcing full fetches; npmjs provides cacheable metadata and validators. Cause 1 already slowed ADO on 11.x.
+[pnpm/pnpm#15722](https://github.com/pnpm/pnpm/pull/15722) (**11.28.1 / 12.8.0**) blocks online metadata shortcuts for [ADO's `no-cache` responses](#ado-versus-npmjs), forcing full fetches. Cause 1 already slowed ADO on 11.x.
 
 Clearing only 11.28.1's uncacheable flag reduces ADO **15.7 s to 13.8 s**. [pnpm/pnpm#15879](https://github.com/pnpm/pnpm/pull/15879)'s five-minute optimization excludes uncacheable responses; fresh-cache probes retain the slowdown.
 
@@ -54,13 +73,4 @@ Clearing only 11.28.1's uncacheable flag reduces ADO **15.7 s to 13.8 s**. [pnpm
 
 Three successful, serial runs per version/registry after warmup: Apple M5 Max/macOS arm64, Node.js 24.16.0; verified published pnpm 11 JavaScript/pnpm 12 native binaries; isolated caches/stores; identical checked-in manifest/starting lockfile restored each run; cache timestamps aged ten minutes; `minimumReleaseAge: 0`; offline options disabled. Ratios use unrounded medians. Explicit network-retry runs were replaced; other slow runs retained. Live timings vary.
 
-pnpm 11 controls isolate code changes; pnpm 12 attribution uses release boundaries, source and network-policy controls, not an isolated Rust revert. Diagnostics preserve corresponding version/registry output lockfiles, not equality across releases. The fixture pins 12.8.0; select exact table versions and `https://registry.npmjs.org/` or the public ADO registry below.
-
-Inspect ADO headers without authentication:
-
-```sh
-curl -fsS -D - -o /dev/null \
-  -H 'Accept: application/vnd.npm.install-v1+json' \
-  'https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/source-map' \
-  | grep -Ei '^(HTTP/|cache-control:|etag:|last-modified:)'
-```
+pnpm 11 controls isolate code changes; pnpm 12 attribution uses release boundaries, source and network-policy controls, not an isolated Rust revert. Diagnostics preserve corresponding version/registry output lockfiles, not equality across releases. The fixture pins 12.8.0; select exact table versions and `https://registry.npmjs.org/` or the public ADO registry above.
