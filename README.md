@@ -1,53 +1,58 @@
-# pnpm 12.8.0: Azure Artifacts dedupe regression
+# pnpm dedupe: registry metadata regressions
 
-This repository reproduces a slowdown in `pnpm dedupe --lockfile-only` when using an Azure Artifacts (ADO) npm registry. Between **12.7.0 and 12.8.0**, dedupe time against ADO increases from **1.2 s to 14.0 s**, while npmjs stays near **0.4 s**.
+`pnpm dedupe --lockfile-only` has distinct npmjs and Azure Artifacts (ADO) slowdowns.
 
-## Results
+Times are median seconds; **ADO/npmjs** compares same-version registries, not versions against baselines.
 
-The slowdown column compares ADO with npmjs for the **same pnpm version**.
+## pnpm 11.x
 
-| pnpm | npmjs | Azure Artifacts | ADO vs npmjs |
-|---|---:|---:|---:|
-| 12.7.0 | 0.4 s | 1.2 s | 2.7X slower |
-| **12.8.0** | **0.4 s** | **14.0 s** | **31.4X slower** |
-| 12.16.1 (latest 12.x tested) | 1.9 s | 12.1 s | 6.4X slower |
-| 11.23.0 | 1.2 s | 3.6 s | 2.9X slower |
-| 11.24.0 | 1.2 s | 2.7 s | 2.2X slower |
-| 11.25.0 | 1.4 s | 2.5 s | 1.8X slower |
-| 11.26.0 | 1.4 s | 2.9 s | 2.1X slower |
-| **11.27.0** | **1.5 s** | **2.4 s** | **1.6X slower** |
-| **11.27.1** | **3.6 s** | **13.3 s** | **3.7X slower** |
-| 11.28.0 | 3.3 s | 13.1 s | 3.9X slower |
-| 11.28.1 | 2.9 s | 15.8 s | 5.4X slower |
-| 11.28.9 (latest 11.x tested) | 1.3 s | 16.0 s | 12.5X slower |
+| pnpm | npmjs | ADO | ADO/npmjs | Change |
+|---|---:|---:|---:|---|
+| 11.27.0 | 1.3 s | 2.4 s | 1.8X | |
+| **11.27.1** | **3.0 s** | **13.7 s** | **4.5X** | Lower lockfile weights disable a metadata-cache shortcut, slowing both registries: [1](#1-lockfile-preferences-disable-cache-reuse) |
+| 11.28.0 | 2.8 s | 13.4 s | 4.7X | |
+| **11.28.1** | 2.8 s | **15.7 s** | **5.7X** | Honor `no-cache`: refetch ADO metadata instead of reusing it, further slowing ADO: [2](#2-no-cache-responses-bypass-metadata-shortcuts) |
+| 11.28.6 | 2.9 s | 16.4 s | 5.7X | |
+| **11.28.7** | **1.2 s** | 16.9 s | 14.2X | New version-dominance proof restores npmjs cache reuse and speed; ADO stays slow: [3](#3-cache-reuse-restored-for-npmjs) |
+| 11.28.9 | 1.2 s | 16.3 s | 14.0X | |
 
-The ADO/npmjs gap jumps from **2.7X to 31.4X** in 12.8.0. The latest 12.x tested has not recovered the earlier ADO performance; its smaller ratio also reflects npmjs getting slower.
+## pnpm 12.x
 
-pnpm 11 has a separate, earlier regression at **11.27.0 to 11.27.1**: ADO becomes **5.5X slower** in absolute time, before the cache-control change in 11.28.1.
+| pnpm | npmjs | ADO | ADO/npmjs | Change |
+|---|---:|---:|---:|---|
+| 12.7.0 | 0.5 s | 0.9 s | 1.6X | |
+| **12.8.0** | 0.5 s | **14.2 s** | **28.5X** | Honor `no-cache`: refetch ADO metadata instead of reusing it, sharply slowing ADO: [2](#2-no-cache-responses-bypass-metadata-shortcuts) |
+| 12.15.0 | 0.5 s | 14.4 s | 29.3X | |
+| **12.16.0** | **2.0 s** | 14.4 s | 7.3X | Refresh metadata during dedupe: npmjs now revalidates cached responses, adding network round trips: [4](#4-online-dedupe-refreshes-metadata) |
+| 12.16.1 | 1.8 s | 14.3 s | 8.0X | |
 
-The 11.23.0 recheck remains fast, but does **not** exactly reproduce the historical 1.4 s npmjs / 2.7 s ADO result (2.0X). Today's ADO median is about 32% higher, with a 2.9X gap. Absolute timings vary, but that does not explain the much larger release-boundary jump.
+## Causes and recovery
 
-## pnpm 11.27.1: lockfile preferences disable a cache shortcut
+### 1. Lockfile preferences disable cache reuse
 
-[pnpm/pnpm#15180: converge after direct dependency bumps](https://github.com/pnpm/pnpm/pull/15180) first shipped in [11.27.1](https://github.com/pnpm/pnpm/releases/tag/v11.27.1), released September 20, 2026. It changes dedupe's lockfile preference weight from **1,000,000 to 1**.
+[pnpm/pnpm#15180](https://github.com/pnpm/pnpm/pull/15180) (**11.27.1**) lowers dedupe's lockfile preference weight from 1,000,000 to 1, disabling the weight-gated metadata shortcut. Restoring only the weight reduces npmjs **3.0 s to 1.2 s**, ADO **13.7 s to 2.6 s**. This diagnostic reverses a correctness fix; it is not a recommended workaround.
 
-The stable-range metadata-cache shortcut introduced by [pnpm/pnpm#13980](https://github.com/pnpm/pnpm/pull/13980) requires a lockfile preference weight of [at least 1,000,000](https://github.com/pnpm/pnpm/blob/v11.27.1/pnpm11/resolving/npm-resolver/src/pickPackageFromMeta.ts#L238-L257). Lowering the weight disables that shortcut during dedupe, increasing registry metadata work. This change affects the TypeScript pnpm 11 implementation, not pnpm 12.
+### 2. `no-cache` responses bypass metadata shortcuts
 
-Restoring only the old weight in an isolated 11.27.1 build brought ADO back from **14.0 s to 3.8 s**, confirming the mechanism. This is a diagnostic, not a proposed fix: simply reverting the weight risks reintroducing the dedupe correctness bug that pnpm/pnpm#15180 fixed.
+[pnpm/pnpm#15722](https://github.com/pnpm/pnpm/pull/15722) (**11.28.1 / 12.8.0**) blocks online metadata shortcuts for `no-cache` responses. ADO returns `no-cache` without ETag/Last-Modified, forcing full fetches; npmjs provides cacheable metadata and validators. Cause 1 already slowed ADO on 11.x.
 
-## pnpm 12.8.0 / 11.28.1: cache-control change
+Clearing only 11.28.1's uncacheable flag reduces ADO **15.7 s to 13.8 s**. [pnpm/pnpm#15879](https://github.com/pnpm/pnpm/pull/15879)'s five-minute optimization excludes uncacheable responses; fresh-cache probes retain the slowdown.
 
-[pnpm/pnpm#15722: refetch registry metadata when caching is forbidden](https://github.com/pnpm/pnpm/pull/15722) first shipped in [12.8.0](https://github.com/pnpm/pnpm/releases/tag/v12.8.0) and [11.28.1](https://github.com/pnpm/pnpm/releases/tag/v11.28.1), both released September 28, 2026.
+### 3. Cache reuse restored for npmjs
 
-ADO returns **`Cache-Control: no-cache` without an ETag** for package metadata (a "packument"). This change marks that metadata as uncacheable and bypasses pnpm's on-disk cache shortcuts during normal online resolution, fetching the metadata again even when the cache is warm. npmjs instead returns `Cache-Control: public, max-age=300` and an ETag.
+[pnpm/pnpm#17090](https://github.com/pnpm/pnpm/pull/17090) (**11.28.7**) replaces the weight threshold with proof that a preferred version must win, restoring cache reuse. Disabling only that proof increases npmjs **1.2 s to 2.8 s**. ADO's `no-cache` restriction remains.
 
-The same releases include [pnpm/pnpm#15879](https://github.com/pnpm/pnpm/pull/15879), which reuses ETag-less metadata for five minutes. That optimization excludes metadata marked uncacheable, so it does not help this ADO feed.
+### 4. Online dedupe refreshes metadata
 
-The release boundary and cache behavior point to pnpm/pnpm#15722, but this is not an isolated bisect of that PR; other changes shipped in the same releases.
+[pnpm/pnpm#17215](https://github.com/pnpm/pnpm/pull/17215) (**12.16.0**) deliberately refreshes metadata during online dedupe, including deprecation notices. npmjs `304 Not Modified` responses still require round trips; ADO already fetched metadata. `--prefer-offline` reduces npmjs to **0.2 s** but changes freshness semantics.
 
-### Inspect the ADO response
+## Methodology
 
-This public feed requires no authentication. Download a packument, discard its body, and display the relevant response headers:
+Three successful, serial runs per version/registry after warmup: Apple M5 Max/macOS arm64, Node.js 24.16.0; verified published pnpm 11 JavaScript/pnpm 12 native binaries; isolated caches/stores; identical checked-in manifest/starting lockfile restored each run; cache timestamps aged ten minutes; `minimumReleaseAge: 0`; offline options disabled. Ratios use unrounded medians. Explicit network-retry runs were replaced; other slow runs retained. Live timings vary.
+
+pnpm 11 controls isolate code changes; pnpm 12 attribution uses release boundaries, source and network-policy controls, not an isolated Rust revert. Diagnostics preserve corresponding version/registry output lockfiles, not equality across releases. The fixture pins 12.8.0; select exact table versions and `https://registry.npmjs.org/` or the public ADO registry below.
+
+Inspect ADO headers without authentication:
 
 ```sh
 curl -fsS -D - -o /dev/null \
@@ -55,34 +60,3 @@ curl -fsS -D - -o /dev/null \
   'https://ms-feed-12.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/source-map' \
   | grep -Ei '^(HTTP/|cache-control:|etag:|last-modified:)'
 ```
-
-Observed October 28, 2026:
-
-```text
-HTTP/2 200
-cache-control: no-cache
-```
-
-There was no `ETag` or `Last-Modified` response header.
-
-## Methodology
-
-Measured October 28, 2026, on macOS arm64, Apple M5 Max, Node.js 24.16.0. The latest versions were selected from npm's `latest-11` and `latest-12` dist-tags on that date.
-
-Timed the wall-clock duration of:
-
-```sh
-pnpm dedupe --lockfile-only
-```
-
-Each version/registry combination used the checked-in dependency manifest and the same starting lockfile, restored before every invocation, with its own metadata cache and initially empty store. The exact pnpm version was verified and matched the fixture's `packageManager`. No dependencies were installed; `minimumReleaseAge` was zero, and neither `offline` nor `preferOffline` was enabled.
-
-The table shows medians of **at least three runs after a cold-cache warmup**, with cache-file timestamps set ten minutes old before each run. The 11.23.0 and 11.27.1 rows include all six retained samples per registry, combining the bisection and confirmation runs. All seven stable releases from 11.23.0 through 11.28.0 were measured, including releases skipped by the binary search. The 11.28.0 row replaces an earlier measurement with this fresh bisection result.
-
-For the pnpm 12 regression, additional runs with fresh timestamps showed the same slowdown, so running dedupe again within five minutes does not avoid it. Runs were serial, with registry order alternated.
-
-The isolated 11.27.1 diagnostic changed only the lockfile preference weight and used three runs per registry, interleaved with stock 11.27.1 and 11.23.0 rechecks. Stock and modified builds produced identical output lockfiles for each registry. The number of metadata cache files rewritten fell from 1,099 to 11; these are filesystem observations, not HTTP request counts.
-
-Times and ratios are rounded to one decimal place; ratios use the unrounded medians. Samples with explicit network retry warnings were replaced, but slow samples without warnings were retained. ADO timings on 12.16.1 varied from 10.2 s to 21.4 s.
-
-The project's `packageManager` pins 12.8.0, the first pnpm 12 release affected by the cache-control regression.
