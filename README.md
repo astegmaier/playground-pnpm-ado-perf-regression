@@ -8,7 +8,7 @@ Times are median seconds; **ADO/npmjs** compares same-version registries, not ve
 
 | pnpm | npmjs | ADO | ADO/npmjs | Change |
 |---|---:|---:|---:|---|
-| 11.27.0 | 1.3 s | 2.4 s | 1.8X | |
+| 11.27.0 | 1.3 s | 2.4 s | 1.8X | baseline - includes [metadata-cache shortcut](#metadata-cache-shortcut) |
 | **11.27.1** | **3.0 s** | **13.7 s** | **4.5X** | Lower lockfile weights disable a metadata-cache shortcut, slowing both registries: [1](#1-lockfile-preferences-disable-cache-reuse) |
 | 11.28.0 | 2.8 s | 13.4 s | 4.7X | |
 | **11.28.1** | 2.8 s | **15.7 s** | **5.7X** | Honor `no-cache`: refetch ADO metadata instead of reusing it, further slowing ADO: [2](#2-no-cache-responses-bypass-metadata-shortcuts) |
@@ -20,11 +20,15 @@ Times are median seconds; **ADO/npmjs** compares same-version registries, not ve
 
 | pnpm | npmjs | ADO | ADO/npmjs | Change |
 |---|---:|---:|---:|---|
-| 12.7.0 | 0.5 s | 0.9 s | 1.6X | |
+| 12.7.0 | 0.5 s | 0.9 s | 1.6X | baseline - includes [metadata-cache shortcut](#metadata-cache-shortcut) |
 | **12.8.0** | 0.5 s | **14.2 s** | **28.5X** | Honor `no-cache`: refetch ADO metadata instead of reusing it, sharply slowing ADO: [2](#2-no-cache-responses-bypass-metadata-shortcuts) |
 | 12.15.0 | 0.5 s | 14.4 s | 29.3X | |
 | **12.16.0** | **2.0 s** | 14.4 s | 7.3X | Refresh metadata during dedupe: npmjs now revalidates cached responses, adding network round trips: [4](#4-online-dedupe-refreshes-metadata) |
 | 12.16.1 | 1.8 s | 14.3 s | 8.0X | |
+
+## Metadata-cache shortcut
+
+[pnpm/pnpm#13980](https://github.com/pnpm/pnpm/pull/13980) lets pnpm reuse cached package metadata without contacting the registry when lockfile preference weights prove that no uncached version can tie or beat the selected cached version. This avoids even conditional revalidation requests. The proof establishes the winning version, not metadata freshness: later deprecation or unpublishing changes can still be missed.
 
 ## Causes and recovery
 
